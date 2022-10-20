@@ -62,7 +62,6 @@ public:
             Database::execute("INSERT INTO history (" + columns + ") VALUES (" + values + ")");
         }
     }
-private:
     int static getSize(std::string id) {
         mysqlx::Row infoItem = Database::execute("SELECT type, size FROM item WHERE id = \'" + id + "\'").fetchOne();
 
@@ -75,6 +74,18 @@ private:
             size += getSize((std::string)child.get(0));
         }
         return size;
+    }
+    static void sendError400(Poco::Net::HTTPServerResponse& resp) {
+        resp.setStatus(Poco::Net::HTTPResponse::HTTP_BAD_REQUEST);
+        std::ostream& out = resp.send();
+        out << R"("code": 400, "message": "Validation Failed")";
+        out.flush();
+    }
+    static void sendError404(Poco::Net::HTTPServerResponse& resp) {
+        resp.setStatus(Poco::Net::HTTPResponse::HTTP_NOT_FOUND);
+        std::ostream& out = resp.send();
+        out << R"("code": 404, "message": "Item not found")";
+        out.flush();
     }
 };
 
@@ -91,12 +102,12 @@ public:
             data = json::parse(req.stream());
         }
         catch (...) {
-            sendError400(res);
+            Util::sendError400(res);
             return;
         }
         if (!data.contains("items") || data["items"].is_null() || !data.contains("updateDate") || data["updateDate"].is_null()){
             //|| !checkDate(data["updateDate"])) {
-            sendError400(res);
+            Util::sendError400(res);
             return;
         }
         
@@ -107,36 +118,36 @@ public:
         for (auto item = data["items"].begin(); item != data["items"].end(); item++) {
 
             if (!item->contains("id") || (*item)["id"].is_null()) {
-                sendError400(res);
+                Util::sendError400(res);
                 return;
             }
             if (!item->contains("type") || !((*item)["type"] == "FOLDER" || (*item)["type"] == "FILE")) {
-                sendError400(res);
+                Util::sendError400(res);
                 return;
             }
             if ((*item)["type"] == "FOLDER") {
                 if (item->contains("url") && !(*item)["url"].is_null()) {
-                    sendError400(res);
+                    Util::sendError400(res);
                     return;
                 }
                 if (item->contains("size") && !(*item)["size"].is_null()) {
-                    sendError400(res);
+                    Util::sendError400(res);
                     return;
                 }
             }
             if ((*item)["type"] == "FILE") {
                 if (item->contains("url") && (*item)["url"].size() > 255) {
-                    sendError400(res);
+                    Util::sendError400(res);
                     return;
                 }
                 if (!item->contains("size") || (*item)["size"].is_null() || (*item)["size"] <= 0) {
-                    sendError400(res);
+                    Util::sendError400(res);
                     return;
                 }
             }
 
             if (cur_ids.find((*item)["id"]) != cur_ids.end()) {
-                sendError400(res);
+                Util::sendError400(res);
                 return;
             }
             cur_ids.insert((*item)["id"]);
@@ -150,7 +161,7 @@ public:
             mysqlx::Row itemInDb = Database::execute("SELECT type FROM item WHERE id = \'" + id + "\'").fetchOne();
             if (!itemInDb.isNull()) {
                 if ((std::string)itemInDb.get(0) != type) {
-                    sendError400(res);
+                    Util::sendError400(res);
                     return;
                 }
             }
@@ -164,12 +175,12 @@ public:
                 if (folders.find(parent) == folders.end()) {
                     mysqlx::Row parentInDb = Database::execute("SELECT type FROM item WHERE id = \'" + parent + "\'").fetchOne();
                     if (parentInDb.isNull()) {
-                        sendError400(res);
+                        Util::sendError400(res);
                         return;
                     }
                     else {
                         if ((std::string)parentInDb.get(0) == "FILE") {
-                            sendError400(res);
+                            Util::sendError400(res);
                             return;
                         }
                     }
@@ -224,21 +235,7 @@ public:
 
         res.setStatus(Poco::Net::HTTPResponse::HTTP_OK);
         res.send().flush();
-    }
-private:
-    
-    void sendError400(Poco::Net::HTTPServerResponse& resp) {
-        resp.setStatus(Poco::Net::HTTPResponse::HTTP_BAD_REQUEST);
-        std::ostream& out = resp.send();
-        out << R"("code": 400, "message": "Validation Failed")";
-        out.flush();
-    }
-    void sendError404(Poco::Net::HTTPServerResponse& resp) {
-        resp.setStatus(Poco::Net::HTTPResponse::HTTP_NOT_FOUND);
-        std::ostream& out = resp.send();
-        out << R"("code": 404, "message": "Item not found")";
-        out.flush();
-    }
+    }   
 };
 
 class DeleteHandler : public Poco::Net::HTTPRequestHandler {
@@ -253,13 +250,13 @@ class DeleteHandler : public Poco::Net::HTTPRequestHandler {
 
         std::vector<std::pair<std::string, std::string>> params = uri.getQueryParameters();
         if (params.size() != 1 || params[0].first != "date") { //|| !checkDate(params[0].second))
-            sendError400(res);
+            Util::sendError400(res);
             return;
         }
 
         mysqlx::Row inDb = Database::execute("SELECT id, parentId FROM item WHERE id = \'" + id + "\'").fetchOne();
         if (inDb.isNull()) {
-            sendError404(res);
+            Util::sendError404(res);
             return;
         }
 
@@ -284,19 +281,6 @@ class DeleteHandler : public Poco::Net::HTTPRequestHandler {
         res.setStatus(Poco::Net::HTTPResponse::HTTP_OK);
         res.send().flush();
    }
-private:
-    void sendError400(Poco::Net::HTTPServerResponse& resp) {
-        resp.setStatus(Poco::Net::HTTPResponse::HTTP_BAD_REQUEST);
-        std::ostream& out = resp.send();
-        out << R"("code": 400, "message": "Validation Failed")";
-        out.flush();
-    }
-    void sendError404(Poco::Net::HTTPServerResponse& resp) {
-        resp.setStatus(Poco::Net::HTTPResponse::HTTP_NOT_FOUND);
-        std::ostream& out = resp.send();
-        out << R"("code": 404, "message": "Item not found")";
-        out.flush();
-    }
 };
 
 class GetNodesHandler :public Poco::Net::HTTPRequestHandler {
@@ -311,7 +295,7 @@ class GetNodesHandler :public Poco::Net::HTTPRequestHandler {
 
         mysqlx::Row infoNode = Database::execute("SELECT id FROM item WHERE id = \'" + id + "\'").fetchOne();
         if (infoNode.isNull()) {
-            sendError404(res);
+            Util::sendError404(res);
             return;
         }
 
@@ -360,18 +344,6 @@ private:
         }
         return reply;
     }
-    void sendError400(Poco::Net::HTTPServerResponse& resp) {
-        resp.setStatus(Poco::Net::HTTPResponse::HTTP_BAD_REQUEST);
-        std::ostream& out = resp.send();
-        out << R"("code": 400, "message": "Validation Failed")";
-        out.flush();
-    }
-    void sendError404(Poco::Net::HTTPServerResponse& resp) {
-        resp.setStatus(Poco::Net::HTTPResponse::HTTP_NOT_FOUND);
-        std::ostream& out = resp.send();
-        out << R"("code": 404, "message": "Item not found")";
-        out.flush();
-    }
 };
 
 class GetUpdatesHandler : public Poco::Net::HTTPRequestHandler {
@@ -381,7 +353,7 @@ class GetUpdatesHandler : public Poco::Net::HTTPRequestHandler {
         Poco::URI uri(req.getURI());
         std::vector<std::pair<std::string, std::string>> params = uri.getQueryParameters();
         if (params.size() != 1 || params[0].first != "date") { //|| !checkDate(params[0].second))
-            sendError400(res);
+            Util::sendError400(res);
             return;
         }
         std::string date = params[0].second;
@@ -429,16 +401,107 @@ class GetUpdatesHandler : public Poco::Net::HTTPRequestHandler {
         out.flush();
 
     }
-private:
-    void sendError400(Poco::Net::HTTPServerResponse& resp) {
-        resp.setStatus(Poco::Net::HTTPResponse::HTTP_BAD_REQUEST);
-        std::ostream& out = resp.send();
-        out << R"("code": 400, "message": "Validation Failed")";
-        out.flush();
-    }
 };
 
+class GetHistoryHandler :public Poco::Net::HTTPRequestHandler {
+    virtual void handleRequest(Poco::Net::HTTPServerRequest& req, Poco::Net::HTTPServerResponse& res) {
+        res.setContentType("application/json");
 
+        Poco::URI uri(req.getURI());
+        std::vector<std::string> path;
+        uri.getPathSegments(path);
+        std::string id = path[1];
+
+        std::vector<std::pair<std::string, std::string>> params = uri.getQueryParameters();
+
+        std::string dateStart, dateEnd; 
+        bool start = false, end = false;
+
+        if (params.size() == 0);
+        else if (params.size() == 1) {
+            if (!dates(params, dateStart, dateEnd, start, end, 0)) {
+                Util::sendError400(res);
+                return;
+            }
+        }
+        else if (params.size() == 2) {
+            if (params[0].first == params[1].first) {
+                Util::sendError400(res);
+                return;
+            }
+            if (!dates(params, dateStart, dateEnd, start, end, 0)) {
+                Util::sendError400(res);
+                return;
+            }
+            if (!dates(params, dateStart, dateEnd, start, end, 1)) {
+                Util::sendError400(res);
+                return;
+            }
+        }
+        else {
+            Util::sendError400(res); 
+            return;
+        }
+
+        mysqlx::Row presence = Database::execute("SELECT id FROM item WHERE id = \'" + id + "\'").fetchOne();
+        if (presence.isNull()) {
+            Util::sendError404(res);
+            return;
+        }
+
+        std::string clauses = "WHERE id = \'" + id + "\'";
+        if (start && end)
+            clauses = "AND updateDate >= \'" + dateStart + "\' AND updateDate < \'" + dateEnd + "\'";
+        else if (start)
+            clauses = "AND updateDate >= \'" + dateStart + "\'";
+        else if (end)
+            clauses = "AND updateDate < \'" + dateEnd + "\'";
+
+        std::list<mysqlx::Row> historyLines =
+            Database::execute("SELECT url, parentId, type, size, DATE_FORMAT(updateDate,'%Y-%m-%dT%H:%m:%s') AS date_formatted FROM history " 
+                 + clauses + "ORDER BY updateDate")
+            .fetchAll();
+
+        std::list<json> history;
+        for (auto line : historyLines) {
+            json cur_line;
+            cur_line["id"] = id;
+            if (!line.get(0).isNull()) cur_line["url"] = line.get(0);
+            else cur_line["url"] = nullptr;
+            if (!line.get(1).isNull()) cur_line["parentId"] = line.get(1);
+            else cur_line["parentId"] = nullptr;
+            cur_line["type"] = line.get(2);
+            if (!line.get(3).isNull()) cur_line["size"] = (int)line.get(3);
+            else cur_line["size"] = nullptr;
+            cur_line["date"] = (std::string)line.get(4) + ".000Z";
+            history.push_back(cur_line);
+        }
+        json reply; 
+        reply["items:"] = history;
+
+        res.setStatus(Poco::Net::HTTPResponse::HTTP_OK);
+        std::ostream& out = res.send(); 
+        out << reply;
+        out.flush();
+    }
+    bool dates(std::vector<std::pair<std::string, std::string>>& params, std::string& dateStart, std::string& dateEnd, bool start, bool end, int i) {
+        if (params[i].first == "dateStart") {
+            dateStart = params[i].second;
+            //if (!checkDate(dateStart) return false;
+            dateStart.pop_back();
+            start = true;
+            return true;
+        }
+        if (params[i].first == "dateEnd") {
+            dateEnd = params[i].second;
+            //if (!checkDate(dateEnd) return false;
+            dateEnd.pop_back();
+            end = true;
+            return true;
+        }
+        return false;
+    }
+};
 
 class CommonRequestHandler : public Poco::Net::HTTPRequestHandlerFactory {
 
@@ -454,6 +517,7 @@ public:
         else if (request.getMethod() == "DELETE" && path.size() == 2 && path[0] == "delete") return new DeleteHandler();
         else if (request.getMethod() == "GET" && path.size() == 2 && path[0] == "nodes") return new GetNodesHandler();
         else if (request.getMethod() == "GET" && path.size() == 1 && path[0] == "updates") return new GetUpdatesHandler();
+        else if (request.getMethod() == "GET" && path.size() == 3 && path[0] == "node" && path[2] == "history") return new GetHistoryHandler();
 		return nullptr;
 	}
 
