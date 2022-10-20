@@ -14,13 +14,77 @@
 #include "Database.h"
 using json = nlohmann::json;
 
+class Util {
+public:
+    static void updateInfoFolder(std::unordered_set<std::string>& folders, std::string date) {
+        std::unordered_set<std::string> allParents;
+
+        while (!folders.empty()) {
+            std::string cur_parent = *folders.begin();
+            folders.erase(cur_parent);
+            allParents.insert(cur_parent);
+
+            mysqlx::Row grandpa = Database::execute("SELECT parentId FROM item WHERE id = \'" + cur_parent + "\'").fetchOne();
+            while (!grandpa.isNull() && !grandpa.get(0).isNull() && allParents.find((std::string)grandpa.get(0)) == allParents.end()) {
+                allParents.insert((std::string)grandpa.get(0));
+                grandpa = Database::execute("SELECT parentId FROM item WHERE id = \'" + (std::string)grandpa.get(0) + "\'").fetchOne();
+            }
+        }
+        for (auto parent : allParents) {
+            int size = getSize(parent);
+            Database::execute("UPDATE item SET size = " + std::to_string(size) + " WHERE id = \'" + parent + "\'");
+
+            mysqlx::Row infoParent = Database::execute("SELECT url, parentId FROM item WHERE id = \'" + parent + "\'").fetchOne();
+
+            std::string columns = "", values = "";
+            columns += "id";
+            values += "\'" + parent + "\'";
+
+            columns += ", updateDate";
+            values += ", \'" + date + "\'";
+
+            if (!infoParent.get(0).isNull()) {
+                columns += ", url";
+                values += ", \'" + (std::string)infoParent.get(0) + "\'";
+            }
+
+            if (!infoParent.get(1).isNull()) {
+                columns += ", parentId";
+                values += ", \'" + (std::string)infoParent.get(1) + "\'";
+            }
+
+            columns += ", type";
+            values += ", \'FOLDER\'";
+
+            columns += ", size";
+            values += ", " + std::to_string(size);
+
+            Database::execute("INSERT INTO history (" + columns + ") VALUES (" + values + ")");
+        }
+    }
+private:
+    int static getSize(std::string id) {
+        mysqlx::Row infoItem = Database::execute("SELECT type, size FROM item WHERE id = \'" + id + "\'").fetchOne();
+
+        if ((std::string)infoItem.get(0) == "FILE")
+            return (int)infoItem.get(1);
+
+        int size = 0;
+        std::list<mysqlx::Row> children = Database::execute("SELECT id FROM item WHERE parentId = \'" + id + "\'").fetchAll();
+        for (auto child : children) {
+            size += getSize((std::string)child.get(0));
+        }
+        return size;
+    }
+};
+
 class PostImportsHandler : public Poco::Net::HTTPRequestHandler {
 public:
     virtual void handleRequest(Poco::Net::HTTPServerRequest& req, Poco::Net::HTTPServerResponse& res) {
         res.setContentType("application/json");
 
-        std::unordered_set<std::string> cur_ids; //ids that received in this request 
-        std::unordered_set<std::string> cur_folders; //folder's ids from this request
+        std::unordered_set<std::string> cur_ids;
+        std::unordered_set<std::string> folders;
 
         json data;
         try {
@@ -35,130 +99,134 @@ public:
             sendError400(res);
             return;
         }
-        else {
-            std::string date = data["updateDate"];
-            date.pop_back();
+        
+        std::string date = data["updateDate"];
+        date.pop_back();
 
 
-            for (auto item = data["items"].begin(); item != data["items"].end(); item++) {
+        for (auto item = data["items"].begin(); item != data["items"].end(); item++) {
 
-                if (!item->contains("id") || (*item)["id"].is_null()) {
+            if (!item->contains("id") || (*item)["id"].is_null()) {
+                sendError400(res);
+                return;
+            }
+            if (!item->contains("type") || !((*item)["type"] == "FOLDER" || (*item)["type"] == "FILE")) {
+                sendError400(res);
+                return;
+            }
+            if ((*item)["type"] == "FOLDER") {
+                if (item->contains("url") && !(*item)["url"].is_null()) {
                     sendError400(res);
                     return;
                 }
-                if (!item->contains("type") || !((*item)["type"] == "FOLDER" || (*item)["type"] == "FILE")) {
+                if (item->contains("size") && !(*item)["size"].is_null()) {
                     sendError400(res);
                     return;
                 }
-                if ((*item)["type"] == "FOLDER") {
-                    if (item->contains("url") && !(*item)["url"].is_null()) {
-                        sendError400(res);
-                        return;
-                    }
-                    if (item->contains("size") && !(*item)["size"].is_null()) {
-                        sendError400(res);
-                        return;
-                    }
-                }
-                if ((*item)["type"] == "FILE") {
-                    if (item->contains("url") && (*item)["url"].size() > 255) {
-                        sendError400(res);
-                        return;
-                    }
-                    if (!item->contains("size") || (*item)["size"].is_null() || (*item)["size"] <= 0) {
-                        sendError400(res);
-                        return;
-                    }
-                }
-
-                if (cur_ids.find((*item)["id"]) != cur_ids.end()) {
+            }
+            if ((*item)["type"] == "FILE") {
+                if (item->contains("url") && (*item)["url"].size() > 255) {
                     sendError400(res);
                     return;
                 }
-                cur_ids.insert((*item)["id"]);
-
-                if ((*item)["type"] == "FOLDER") cur_folders.insert((*item)["id"]);
-
-
-                std::string id = (*item)["id"];
-                std::string type = (*item)["type"];
-
-                mysqlx::Row itemInDb = Database::execute("SELECT type FROM item WHERE id = \'" + id + "\'").fetchOne();
-                if (!itemInDb.isNull()) {
-                    if ((std::string)itemInDb.get(0) != type) {
-                        sendError400(res); 
-                        return;
-                    }
+                if (!item->contains("size") || (*item)["size"].is_null() || (*item)["size"] <= 0) {
+                    sendError400(res);
+                    return;
                 }
             }
 
-            for (auto item = data["items"].begin(); item != data["items"].end(); item++) {
+            if (cur_ids.find((*item)["id"]) != cur_ids.end()) {
+                sendError400(res);
+                return;
+            }
+            cur_ids.insert((*item)["id"]);
 
-                if (item->contains("parentId") && !(*item)["parentId"].is_null()) {
-                    std::string parent = (*item)["parentId"];
+            if ((*item)["type"] == "FOLDER") folders.insert((*item)["id"]);
 
-                    if (cur_folders.find(parent) == cur_folders.end()) {
-                        mysqlx::Row parentInDb = Database::execute("SELECT type FROM item WHERE id = \'" + parent + "\'").fetchOne();
-                        if (parentInDb.isNull()) {
+
+            std::string id = (*item)["id"];
+            std::string type = (*item)["type"];
+
+            mysqlx::Row itemInDb = Database::execute("SELECT type FROM item WHERE id = \'" + id + "\'").fetchOne();
+            if (!itemInDb.isNull()) {
+                if ((std::string)itemInDb.get(0) != type) {
+                    sendError400(res);
+                    return;
+                }
+            }
+        }
+
+        for (auto item = data["items"].begin(); item != data["items"].end(); item++) {
+
+            if (item->contains("parentId") && !(*item)["parentId"].is_null()) {
+                std::string parent = (*item)["parentId"];
+
+                if (folders.find(parent) == folders.end()) {
+                    mysqlx::Row parentInDb = Database::execute("SELECT type FROM item WHERE id = \'" + parent + "\'").fetchOne();
+                    if (parentInDb.isNull()) {
+                        sendError400(res);
+                        return;
+                    }
+                    else {
+                        if ((std::string)parentInDb.get(0) == "FILE") {
                             sendError400(res);
                             return;
                         }
-                        else {
-                            if ((std::string)parentInDb.get(0) == "FILE") {
-                                sendError400(res);
-                                return;
-                            }
-                        }
                     }
+                    folders.insert(parent);
                 }
             }
-
-            for (auto item = data["items"].begin(); item != data["items"].end(); item++) {
-                std::string columns = "", values = "", update = "";
-                columns += "id";
-                values += "\'" + (std::string)(*item)["id"] + "\'";
-
-                columns += ", updateDate";
-                values += ", \'" + date + "\'";
-                update += "updateDate = \'" + date + "\'";
-
-                if (item->contains("url") && !(*item)["url"].is_null()) {
-                    columns += ", url";
-                    values += ", \'" + (std::string)(*item)["url"] + "\'";
-                    update += ", url = \'" + (std::string)(*item)["url"] + "\'";
-                }
-
-                if (item->contains("parentId") && !(*item)["parentId"].is_null()) {
-                    columns += ", parentId";
-                    values += ", \'" + (std::string)(*item)["parentId"] + "\'";
-                    update += ", parentId = \'" + (std::string)(*item)["parentId"] + "\'";
-                }
-
-                columns += ", type";
-                values += ", \'" + (std::string)(*item)["type"] + "\'";
-
-                if (item->contains("size") && !(*item)["size"].is_null()) {
-                    columns += ", size";
-                    values += ", " + std::to_string((int)(*item)["size"]);
-                    update += ", size = " + std::to_string((int)(*item)["size"]);
-                }
-
-                mysqlx::Row inDb = Database::execute("SELECT * FROM item WHERE id = \'" + (std::string)(*item)["id"] + "\'").fetchOne();
-
-                if (inDb.isNull()) {
-                     Database::execute("INSERT INTO item (" + columns + ") VALUES (" + values + ")");
-                }
-                else Database::execute("UPDATE item SET " + update + " WHERE id = \'" + (std::string)(*item)["id"] + "\'");
-
-                Database::execute("INSERT INTO history (id, updateDate) VALUES (\'" + (std::string)(*item)["id"] + "\', \'" + date + "\')");
-            }
-
-            res.setStatus(Poco::Net::HTTPResponse::HTTP_OK);
-            res.send().flush();
-
         }
+
+        for (auto item = data["items"].begin(); item != data["items"].end(); item++) {
+            std::string columns = "", values = "", update = "";
+            columns += "id";
+            values += "\'" + (std::string)(*item)["id"] + "\'";
+
+            columns += ", updateDate";
+            values += ", \'" + date + "\'";
+            update += "updateDate = \'" + date + "\'";
+
+            if (item->contains("url") && !(*item)["url"].is_null()) {
+                columns += ", url";
+                values += ", \'" + (std::string)(*item)["url"] + "\'";
+                update += ", url = \'" + (std::string)(*item)["url"] + "\'";
+            }
+
+            if (item->contains("parentId") && !(*item)["parentId"].is_null()) {
+                columns += ", parentId";
+                values += ", \'" + (std::string)(*item)["parentId"] + "\'";
+                update += ", parentId = \'" + (std::string)(*item)["parentId"] + "\'";
+            }
+
+            columns += ", type";
+            values += ", \'" + (std::string)(*item)["type"] + "\'";
+
+            if (item->contains("size") && !(*item)["size"].is_null()) {
+                columns += ", size";
+                values += ", " + std::to_string((int)(*item)["size"]);
+                update += ", size = " + std::to_string((int)(*item)["size"]);
+            }
+
+            mysqlx::Row inDb = Database::execute("SELECT id FROM item WHERE id = \'" + (std::string)(*item)["id"] + "\'").fetchOne();
+
+            if (inDb.isNull()) {
+                Database::execute("INSERT INTO item (" + columns + ") VALUES (" + values + ")");
+            }
+            else Database::execute("UPDATE item SET " + update + " WHERE id = \'" + (std::string)(*item)["id"] + "\'");
+
+            if ((std::string)(*item)["type"] == "FILE")
+                Database::execute("INSERT INTO history (" + columns + ") VALUES (" + values + ")");
+        }
+      
+        
+        Util::updateInfoFolder(folders, date);
+
+        res.setStatus(Poco::Net::HTTPResponse::HTTP_OK);
+        res.send().flush();
     }
 private:
+    
     void sendError400(Poco::Net::HTTPServerResponse& resp) {
         resp.setStatus(Poco::Net::HTTPResponse::HTTP_BAD_REQUEST);
         std::ostream& out = resp.send();
@@ -176,6 +244,7 @@ private:
 class DeleteHandler : public Poco::Net::HTTPRequestHandler {
     virtual void handleRequest(Poco::Net::HTTPServerRequest& req, Poco::Net::HTTPServerResponse& res) {
         res.setContentType("application/json");
+        std::unordered_set<std::string> folders;
 
         Poco::URI uri(req.getURI());
         std::vector<std::string> path;
@@ -188,11 +257,13 @@ class DeleteHandler : public Poco::Net::HTTPRequestHandler {
             return;
         }
 
-        mysqlx::Row inDb = Database::execute("SELECT * FROM item WHERE id = \'" + id + "\'").fetchOne();
+        mysqlx::Row inDb = Database::execute("SELECT id, parentId FROM item WHERE id = \'" + id + "\'").fetchOne();
         if (inDb.isNull()) {
             sendError404(res);
             return;
         }
+
+        if (!inDb.get(1).isNull()) folders.insert((std::string)inDb.get(1));
 
         std::unordered_set<std::string> to_delete;
         to_delete.insert(id);
@@ -205,6 +276,10 @@ class DeleteHandler : public Poco::Net::HTTPRequestHandler {
                 to_delete.insert((std::string)line.get(0));
             }
         }
+
+        std::string date = (std::string)params[0].second; 
+        date.pop_back();
+        Util::updateInfoFolder(folders, date);
 
         res.setStatus(Poco::Net::HTTPResponse::HTTP_OK);
         res.send().flush();
@@ -234,7 +309,7 @@ class GetNodesHandler :public Poco::Net::HTTPRequestHandler {
 
         std::string id = path[1];
 
-        mysqlx::Row infoNode = Database::execute("SELECT * FROM item WHERE id = \'" + id + "\'").fetchOne();
+        mysqlx::Row infoNode = Database::execute("SELECT id FROM item WHERE id = \'" + id + "\'").fetchOne();
         if (infoNode.isNull()) {
             sendError404(res);
             return;
@@ -251,25 +326,25 @@ private:
     json addInfo(std::string id, int& size) {
         json reply;
         mysqlx::Row infoNode = 
-            Database::execute("SELECT *, DATE_FORMAT(updateDate,'%Y-%m-%dT%H:%m:%s') AS date_formatted FROM item WHERE id = \'" + id + "\'")
+            Database::execute("SELECT url, parentId, type, , size, DATE_FORMAT(updateDate,'%Y-%m-%dT%H:%m:%s') AS date_formatted FROM item WHERE id = \'" + id + "\'")
             .fetchOne();
         reply["id"] = id;
 
-        if (infoNode.get(1).isNull()) reply["url"] = nullptr; 
-        else reply["url"] = infoNode.get(1);
+        if (infoNode.get(0).isNull()) reply["url"] = nullptr; 
+        else reply["url"] = infoNode.get(0);
 
-        if (infoNode.get(2).isNull()) reply["parentId"] = nullptr;
-        else reply["parentId"] = infoNode.get(2);
+        if (infoNode.get(1).isNull()) reply["parentId"] = nullptr;
+        else reply["parentId"] = infoNode.get(1);
 
-        reply["type"] = infoNode.get(3);
+        reply["type"] = infoNode.get(2);
 
-        reply["date"] = (std::string)infoNode.get(6) + ".000Z";
+        reply["date"] = (std::string)infoNode.get(4) + ".000Z";
 
         if (reply["type"] == "FILE")
         {
-            reply["size"] = (int)infoNode.get(4);
+            reply["size"] = (int)infoNode.get(3);
             reply["children"] = nullptr;
-            size = (int)infoNode.get(4);
+            size = (int)infoNode.get(3);
         }
         else {
             size = 0; 
@@ -325,22 +400,22 @@ class GetUpdatesHandler : public Poco::Net::HTTPRequestHandler {
         for (auto id : ids) {
             json item; 
             mysqlx::Row infoItem =
-                Database::execute("SELECT *, DATE_FORMAT(updateDate,'%Y-%m-%dT%H:%m:%s') AS date_formatted FROM item WHERE id = \'"
+                Database::execute("SELECT url, parentId, type, size, DATE_FORMAT(updateDate,'%Y-%m-%dT%H:%m:%s') AS date_formatted FROM item WHERE id = \'"
                     + id + "\'").fetchOne();
             item["id"] = id;
 
-            if (infoItem.get(1).isNull()) item["url"] = nullptr;
-            else item["url"] = infoItem.get(1);
+            if (infoItem.get(0).isNull()) item["url"] = nullptr;
+            else item["url"] = infoItem.get(0);
 
-            if (infoItem.get(2).isNull()) item["parentId"] = nullptr;
-            else item["parentId"] = infoItem.get(2);
+            if (infoItem.get(1).isNull()) item["parentId"] = nullptr;
+            else item["parentId"] = infoItem.get(1);
 
-            item["type"] = infoItem.get(3);
+            item["type"] = infoItem.get(2);
 
-            if (infoItem.get(4).isNull()) item["size"] = nullptr;
-            else item["size"] = (int)infoItem.get(4);
+            if (infoItem.get(3).isNull()) item["size"] = nullptr;
+            else item["size"] = (int)infoItem.get(3);
 
-            item["date"] = (std::string)infoItem.get(6) + ".000Z";
+            item["date"] = (std::string)infoItem.get(4) + ".000Z";
 
             items.push_back(item);
         }

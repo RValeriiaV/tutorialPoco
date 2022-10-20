@@ -15,7 +15,9 @@ public:
             .execute();
 
         sess
-            .sql("CREATE TABLE IF NOT EXISTS history(history_id bigint unsigned PRIMARY KEY AUTO_INCREMENT, id VARCHAR(255), updateDate DATETIME NOT NULL, FOREIGN KEY(id) REFERENCES item(id) ON DELETE CASCADE);")
+            .sql((std::string)"CREATE TABLE IF NOT EXISTS history(history_id bigint unsigned PRIMARY KEY AUTO_INCREMENT, id VARCHAR(255), " + 
+                "url text, parentId text, type varchar(6) NOT NULL, size bigint, updateDate DATETIME NOT NULL," +
+                "FOREIGN KEY(id) REFERENCES item(id) ON DELETE CASCADE); ")
             .execute();
     }
 };
