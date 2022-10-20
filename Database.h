@@ -11,11 +11,11 @@ public:
     }
     static void start() {
         sess
-            .sql("CREATE TABLE IF NOT EXISTS item(id VARCHAR(255), url text, parentId text, type varchar(6) NOT NULL, size bigint, updateDate text NOT NULL, PRIMARY KEY(id));")
+            .sql("CREATE TABLE IF NOT EXISTS item(id VARCHAR(255), url text, parentId text, type varchar(6) NOT NULL, size bigint, updateDate DATETIME NOT NULL, PRIMARY KEY(id));")
             .execute();
 
         sess
-            .sql("CREATE TABLE IF NOT EXISTS history(history_id bigint unsigned PRIMARY KEY AUTO_INCREMENT, id VARCHAR(255), updateDate text NOT NULL, FOREIGN KEY(id) REFERENCES item(id) ON DELETE CASCADE);")
+            .sql("CREATE TABLE IF NOT EXISTS history(history_id bigint unsigned PRIMARY KEY AUTO_INCREMENT, id VARCHAR(255), updateDate DATETIME NOT NULL, FOREIGN KEY(id) REFERENCES item(id) ON DELETE CASCADE);")
             .execute();
     }
 };

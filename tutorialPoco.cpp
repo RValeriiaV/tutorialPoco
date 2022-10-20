@@ -37,6 +37,8 @@ public:
         }
         else {
             std::string date = data["updateDate"];
+            date.pop_back();
+
 
             for (auto item = data["items"].begin(); item != data["items"].end(); item++) {
 
@@ -248,7 +250,9 @@ class GetNodesHandler :public Poco::Net::HTTPRequestHandler {
 private:
     json addInfo(std::string id, int& size) {
         json reply;
-        mysqlx::Row infoNode = Database::execute("SELECT * FROM item WHERE id = \'" + id + "\'").fetchOne();
+        mysqlx::Row infoNode = 
+            Database::execute("SELECT *, DATE_FORMAT(updateDate,'%Y-%m-%dT%H:%m:%s') AS date_formatted FROM item WHERE id = \'" + id + "\'")
+            .fetchOne();
         reply["id"] = id;
 
         if (infoNode.get(1).isNull()) reply["url"] = nullptr; 
@@ -259,7 +263,7 @@ private:
 
         reply["type"] = infoNode.get(3);
 
-        reply["date"] = infoNode.get(5);
+        reply["date"] = (std::string)infoNode.get(6) + ".000Z";
 
         if (reply["type"] == "FILE")
         {
@@ -295,6 +299,70 @@ private:
     }
 };
 
+class GetUpdatesHandler : public Poco::Net::HTTPRequestHandler {
+    virtual void handleRequest(Poco::Net::HTTPServerRequest& req, Poco::Net::HTTPServerResponse& res) {
+        res.setContentType("application/json");
+
+        Poco::URI uri(req.getURI());
+        std::vector<std::pair<std::string, std::string>> params = uri.getQueryParameters();
+        if (params.size() != 1 || params[0].first != "date") { //|| !checkDate(params[0].second))
+            sendError400(res);
+            return;
+        }
+        std::string date = params[0].second;
+        date.pop_back();
+        
+        std::list<mysqlx::Row> updatedIds =
+            Database::execute("SELECT id FROM history WHERE timestampdiff(second, updateDate, \'" + (std::string)date + "\') <= 24 * 3600")
+            .fetchAll();
+
+        std::set<std::string> ids;
+        for (auto updation : updatedIds) {
+            ids.insert((std::string)updation.get(0));
+        }
+
+        std::list<json> items;
+        for (auto id : ids) {
+            json item; 
+            mysqlx::Row infoItem =
+                Database::execute("SELECT *, DATE_FORMAT(updateDate,'%Y-%m-%dT%H:%m:%s') AS date_formatted FROM item WHERE id = \'"
+                    + id + "\'").fetchOne();
+            item["id"] = id;
+
+            if (infoItem.get(1).isNull()) item["url"] = nullptr;
+            else item["url"] = infoItem.get(1);
+
+            if (infoItem.get(2).isNull()) item["parentId"] = nullptr;
+            else item["parentId"] = infoItem.get(2);
+
+            item["type"] = infoItem.get(3);
+
+            if (infoItem.get(4).isNull()) item["size"] = nullptr;
+            else item["size"] = (int)infoItem.get(4);
+
+            item["date"] = (std::string)infoItem.get(6) + ".000Z";
+
+            items.push_back(item);
+        }
+
+        json reply;
+        reply["items"] = items;
+
+        res.setStatus(Poco::Net::HTTPResponse::HTTP_BAD_REQUEST);
+        std::ostream& out = res.send(); 
+        out << reply;
+        out.flush();
+
+    }
+private:
+    void sendError400(Poco::Net::HTTPServerResponse& resp) {
+        resp.setStatus(Poco::Net::HTTPResponse::HTTP_BAD_REQUEST);
+        std::ostream& out = resp.send();
+        out << R"("code": 400, "message": "Validation Failed")";
+        out.flush();
+    }
+};
+
 
 
 class CommonRequestHandler : public Poco::Net::HTTPRequestHandlerFactory {
@@ -310,6 +378,7 @@ public:
         if (request.getMethod() == "POST" && path.size() == 1 && path[0] == "imports") return new PostImportsHandler();
         else if (request.getMethod() == "DELETE" && path.size() == 2 && path[0] == "delete") return new DeleteHandler();
         else if (request.getMethod() == "GET" && path.size() == 2 && path[0] == "nodes") return new GetNodesHandler();
+        else if (request.getMethod() == "GET" && path.size() == 1 && path[0] == "updates") return new GetUpdatesHandler();
 		return nullptr;
 	}
 
