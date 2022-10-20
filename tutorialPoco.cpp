@@ -17,6 +17,8 @@ using json = nlohmann::json;
 class PostImportsHandler : public Poco::Net::HTTPRequestHandler {
 public:
     virtual void handleRequest(Poco::Net::HTTPServerRequest& req, Poco::Net::HTTPServerResponse& res) {
+        res.setContentType("application/json");
+
         std::unordered_set<std::string> cur_ids; //ids that received in this request 
         std::unordered_set<std::string> cur_folders; //folder's ids from this request
 
@@ -79,11 +81,9 @@ public:
                 std::string id = (*item)["id"];
                 std::string type = (*item)["type"];
 
-                mysqlx::SqlResult itemInDb = Database::execute("SELECT type FROM item WHERE id = \'" + id + "\'");
-                std::list<mysqlx::Row> rows = itemInDb.fetchAll();
-                if (!rows.empty()) {
-                    mysqlx::abi2::r0::string typeInDb = rows.begin()->get(0);
-                    if (typeInDb != type) {
+                mysqlx::Row itemInDb = Database::execute("SELECT type FROM item WHERE id = \'" + id + "\'").fetchOne();
+                if (!itemInDb.isNull()) {
+                    if ((std::string)itemInDb.get(0) != type) {
                         sendError400(res); 
                         return;
                     }
@@ -91,18 +91,18 @@ public:
             }
 
             for (auto item = data["items"].begin(); item != data["items"].end(); item++) {
+
                 if (item->contains("parentId") && !(*item)["parentId"].is_null()) {
                     std::string parent = (*item)["parentId"];
+
                     if (cur_folders.find(parent) == cur_folders.end()) {
-                        mysqlx::SqlResult parentInDb = Database::execute("SELECT type FROM item WHERE id = \'" + parent + "\'");
-                        std::list< mysqlx::Row> rows = parentInDb.fetchAll();
-                        if (rows.empty()) {
+                        mysqlx::Row parentInDb = Database::execute("SELECT type FROM item WHERE id = \'" + parent + "\'").fetchOne();
+                        if (parentInDb.isNull()) {
                             sendError400(res);
                             return;
                         }
                         else {
-                            mysqlx::abi2::r0::string typeInDb = rows.begin()->get(0);
-                            if (typeInDb == "FILE") {
+                            if ((std::string)parentInDb.get(0) == "FILE") {
                                 sendError400(res);
                                 return;
                             }
@@ -141,10 +141,9 @@ public:
                     update += ", size = " + std::to_string((int)(*item)["size"]);
                 }
 
-                mysqlx::SqlResult inDb = Database::execute("SELECT * FROM item WHERE id = \'" + (std::string)(*item)["id"] + "\'");
-                std::list< mysqlx::Row> rows = inDb.fetchAll();
+                mysqlx::Row inDb = Database::execute("SELECT * FROM item WHERE id = \'" + (std::string)(*item)["id"] + "\'").fetchOne();
 
-                if (rows.empty()) {
+                if (inDb.isNull()) {
                      Database::execute("INSERT INTO item (" + columns + ") VALUES (" + values + ")");
                 }
                 else Database::execute("UPDATE item SET " + update + " WHERE id = \'" + (std::string)(*item)["id"] + "\'");
@@ -174,14 +173,11 @@ private:
 
 class DeleteHandler : public Poco::Net::HTTPRequestHandler {
     virtual void handleRequest(Poco::Net::HTTPServerRequest& req, Poco::Net::HTTPServerResponse& res) {
+        res.setContentType("application/json");
+
         Poco::URI uri(req.getURI());
         std::vector<std::string> path;
         uri.getPathSegments(path);
-
-        if (path[0] != "delete") {
-            sendError400(res);
-            return;
-        }
         std::string id = path[1];
 
         std::vector<std::pair<std::string, std::string>> params = uri.getQueryParameters();
@@ -190,9 +186,8 @@ class DeleteHandler : public Poco::Net::HTTPRequestHandler {
             return;
         }
 
-        mysqlx::SqlResult result = Database::execute("SELECT * FROM item WHERE id = \'" + id + "\'");
-        std::list<mysqlx::Row> rows = result.fetchAll();
-        if (rows.empty()) {
+        mysqlx::Row inDb = Database::execute("SELECT * FROM item WHERE id = \'" + id + "\'").fetchOne();
+        if (inDb.isNull()) {
             sendError404(res);
             return;
         }
@@ -203,8 +198,7 @@ class DeleteHandler : public Poco::Net::HTTPRequestHandler {
             id = *(to_delete.begin());
             to_delete.erase(id);
             Database::execute("DELETE FROM item WHERE id = \'" + id + "\'");
-            result = Database::execute("SELECT id FROM item WHERE parentId = \'" + id + "\'");
-            rows = result.fetchAll();
+            std::list<mysqlx::Row> rows = Database::execute("SELECT id FROM item WHERE parentId = \'" + id + "\'").fetchAll();
             for (auto line: rows) {
                 to_delete.insert((std::string)line.get(0));
             }
@@ -228,15 +222,95 @@ private:
     }
 };
 
+class GetNodesHandler :public Poco::Net::HTTPRequestHandler {
+    virtual void handleRequest(Poco::Net::HTTPServerRequest& req, Poco::Net::HTTPServerResponse& res) {
+        res.setContentType("application/json");
+
+        Poco::URI uri(req.getURI());
+        std::vector<std::string> path;
+        uri.getPathSegments(path);
+
+        std::string id = path[1];
+
+        mysqlx::Row infoNode = Database::execute("SELECT * FROM item WHERE id = \'" + id + "\'").fetchOne();
+        if (infoNode.isNull()) {
+            sendError404(res);
+            return;
+        }
+
+        int buf;
+        json reply = addInfo(id, buf);
+        std::ostream& out = res.send(); 
+        out << reply;
+        out.flush();
+        res.setStatus(Poco::Net::HTTPResponse::HTTP_OK);
+    }
+private:
+    json addInfo(std::string id, int& size) {
+        json reply;
+        mysqlx::Row infoNode = Database::execute("SELECT * FROM item WHERE id = \'" + id + "\'").fetchOne();
+        reply["id"] = id;
+
+        if (infoNode.get(1).isNull()) reply["url"] = nullptr; 
+        else reply["url"] = infoNode.get(1);
+
+        if (infoNode.get(2).isNull()) reply["parentId"] = nullptr;
+        else reply["parentId"] = infoNode.get(2);
+
+        reply["type"] = infoNode.get(3);
+
+        reply["date"] = infoNode.get(5);
+
+        if (reply["type"] == "FILE")
+        {
+            reply["size"] = (int)infoNode.get(4);
+            reply["children"] = nullptr;
+            size = (int)infoNode.get(4);
+        }
+        else {
+            size = 0; 
+            std::list<json> children_list;
+            std::list<mysqlx::Row> children = Database::execute("SELECT id FROM item WHERE parentId = \'" + id + "\'").fetchAll();
+            for (auto child : children) {
+                int child_size;
+                children_list.push_back(addInfo((std::string)child.get(0), child_size));
+                size += child_size;
+            }
+            reply["size"] = size;
+            reply["children"] = children_list;
+        }
+        return reply;
+    }
+    void sendError400(Poco::Net::HTTPServerResponse& resp) {
+        resp.setStatus(Poco::Net::HTTPResponse::HTTP_BAD_REQUEST);
+        std::ostream& out = resp.send();
+        out << R"("code": 400, "message": "Validation Failed")";
+        out.flush();
+    }
+    void sendError404(Poco::Net::HTTPServerResponse& resp) {
+        resp.setStatus(Poco::Net::HTTPResponse::HTTP_NOT_FOUND);
+        std::ostream& out = resp.send();
+        out << R"("code": 404, "message": "Item not found")";
+        out.flush();
+    }
+};
+
+
+
 class CommonRequestHandler : public Poco::Net::HTTPRequestHandlerFactory {
 
 public:
 	CommonRequestHandler() {}
 
 	virtual Poco::Net::HTTPRequestHandler* createRequestHandler(const Poco::Net::HTTPServerRequest& request) {
-        if (request.getMethod() == "POST" && request.getURI() == "/imports") return new PostImportsHandler();
-        else if (request.getMethod() == "DELETE") return new DeleteHandler();
-		return nullptr; // Does everybody use C++11?
+        Poco::URI uri(request.getURI());
+        std::vector<std::string> path; 
+        uri.getPathSegments(path);
+
+        if (request.getMethod() == "POST" && path.size() == 1 && path[0] == "imports") return new PostImportsHandler();
+        else if (request.getMethod() == "DELETE" && path.size() == 2 && path[0] == "delete") return new DeleteHandler();
+        else if (request.getMethod() == "GET" && path.size() == 2 && path[0] == "nodes") return new GetNodesHandler();
+		return nullptr;
 	}
 
 };
